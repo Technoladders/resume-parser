@@ -49,6 +49,43 @@ coverage.xml
 # Sphinx documentation
 docs/_build/
 
-# Ignore virtual environment
-venv/
-.env
+# Virtual environments (you already have this, but extra patterns don't hurt)
+env/
+ENV/
+.venv/
+
+# IDEs and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Large files that sometimes sneak in
+*.pdf
+*.docx
+*.zip
+*.tar.gz
+
+# Python cache and local stuff
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints
+
+# Model files / weights (usually too big)
+*.h5
+*.pth
+*.pkl
+*.pickle
+*.bin
+*.onnx
