@@ -638,17 +638,18 @@ def process_analysis(job_id: str, candidate_id: str, resume_path: str, job_descr
                     try: 
                         company_id = None
                        
-                        company_data = {"name": company_name, "normalized_name": normalized_name}
-                        supabase.table("companies").upsert(company_data, on_conflict="name").execute()
+                        company_data = {"name": company_name, "normalized_name": normalized_name, "organization_id": organization_id}
+                        supabase.table("companies").upsert(company_data, on_conflict="name, organization_id").execute()
                       
-                        fetch_resp = supabase.table("companies").select("id").eq("name", company_name).limit(1).maybe_single().execute()
+                        fetch_resp = supabase.table("companies").select("id").eq("name", company_name).eq("organization_id", organization_id).limit(1).maybe_single().execute()
                         if fetch_resp.data: company_id = fetch_resp.data["id"]
                         else: raise Exception(f"Could not retrieve company ID after upsert for: {company_name}")
                    
                         company_entries.append({"candidate_id": candidate_id, "job_id": job_id, "company_id": company_id, "designation": company.get("designation", "-"), "years": company.get("years", "-"), "organization_id": organization_id})
                     except Exception as company_proc_exc:
-                         log_progress(job_id, "process_companies_error", f"Error processing company '{company_name}': {company_proc_exc}")
-                         raise 
+                        log_progress(job_id, "process_companies_error", f"Error processing company '{company_name}': {company_proc_exc}")
+                        logger.warning(f"Skipping company {company_name} due to error: {company_proc_exc}")
+                        continue  
             if company_entries:
                 log_progress(job_id, "save_candidate_companies_start", "Upserting associations", {"count": len(company_entries)})
                 try:
