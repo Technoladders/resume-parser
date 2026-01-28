@@ -13,13 +13,10 @@ CORS(app, resources={r"/api/*": {"origins": "*"}})
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-@app.route('/api/validate-candidate', methods=['POST', 'OPTIONS'])
+@app.route('/api/validate-candidate', methods=['POST'])
 def validate_candidate():
     # START OF CHANGE: Add this block of code here to fix the timeout.
     # This handles the browser's preflight check before it tries to read the request body.
-    if request.method == 'OPTIONS':
-        response = make_response()
-        return response
     # END OF CHANGE
     logger.info("Received request to /api/validate-candidate with headers: %s", request.headers)
     data = request.get_json()
@@ -54,13 +51,10 @@ def validate_candidate():
 
 # --- NEW BATCH PROCESSING ENDPOINT ---
 
-@app.route('/api/validate-candidates-batch', methods=['POST', 'OPTIONS'])
+@app.route('/api/validate-candidates-batch', methods=['POST'])
 def validate_candidates_batch():
     # START OF CHANGE: Add this block of code here to fix the timeout.
     # This handles the browser's preflight check before it tries to read the request body.
-    if request.method == 'OPTIONS':
-        response = make_response()
-        return response
     # END OF CHANGE
     """
     Accepts a batch of candidates for a single job and queues them for analysis.
