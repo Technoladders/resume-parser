@@ -36,8 +36,13 @@ supabase_admin_client: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Initialize Redis and RQ queue
+# Server host
 redis_conn = Redis(host='redis', port=6379)
 queue = Queue(connection=redis_conn)
+
+# Localhost host
+# redis_conn = Redis(host='localhost', port=6379)
+# queue = Queue(connection=redis_conn)
 
 # redis_conn = Redis(host='localhost', port=6379)
 # queue = Queue(connection=redis_conn)

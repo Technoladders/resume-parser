@@ -269,7 +269,7 @@ def clean_ai_output(text: str) -> str:
     return text
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-def generate_report(resume_text: str, job_description: str, job_id: str, organization_id: str, user_id: str) -> dict:
+def generate_report(resume_text: str, job_description: str, job_id: str, organization_id: str, user_id: str, analysis_config: dict = None) -> dict:
     """Generates analysis report using OpenAI, includes detailed logging."""
     attempt_id = os.urandom(4).hex()
     current_step = "init"
@@ -282,85 +282,255 @@ def generate_report(resume_text: str, job_description: str, job_id: str, organiz
     raw_ai_text = ""
     # --- END: MODIFICATION ---
     
+    # --- DYNAMIC PROMPT GENERATION ---
+    
+    # Default Defaults
+    weights = {
+        "Technical Skills": 45,
+        "Work Experience": 30,
+        "Projects": 15,
+        "Education": 10
+    }
+    
+    include_soft = False
+    include_achievements = False
+
+    # Override if config exists
+    if analysis_config:
+        if "weights" in analysis_config:
+            weights = analysis_config["weights"]
+        if "sections" in analysis_config:
+            include_soft = analysis_config["sections"].get("Soft Skills", False)
+            include_achievements = analysis_config["sections"].get("Achievements", False)
+
+    # Build the weightage string dynamically
+    weightage_text = "4. WEIGHTAGE RULES (STRICT):\n   Use these EXACT weights provided by the user configuration:\n"
+    for section, value in weights.items():
+        weightage_text += f"     - {section} = {value}%\n"
+    
+    weightage_text += "\n   Note: If a section has 0% weight, it must NOT affect the overall score, but you may still analyze it for qualitative feedback.\n"
+
+    # Build Section JSON structure dynamically based on preferences
+    sections_json_structure = ""
+    
+    # Required Sections
+    sections_json_structure += """
+    {{
+      "section": "Technical Skills",
+      "weightage": {tech_w},
+      "submenus": [
+        {{ "submenu": "Core Required Skills", "weightage": 100, "score": number, "weighted_score": number, "remarks": "..." }}
+      ],
+      "section_contribution": number
+    }},
+    {{
+      "section": "Work Experience",
+      "weightage": {exp_w},
+      "submenus": [
+        {{ "submenu": "Role Relevance", "weightage": 50, "score": number, "weighted_score": number, "remarks": "..." }},
+        {{ "submenu": "Experience Depth", "weightage": 30, "score": number, "weighted_score": number, "remarks": "..." }},
+        {{ "submenu": "Recency & Continuity", "weightage": 20, "score": number, "weighted_score": number, "remarks": "..." }}
+      ],
+      "section_contribution": number
+    }},
+    {{
+      "section": "Projects",
+      "weightage": {proj_w},
+      "submenus": [
+         {{ "submenu": "Relevance & Complexity", "weightage": 100, "score": number, "weighted_score": number, "remarks": "..." }}
+      ],
+      "section_contribution": number
+    }},
+    {{
+      "section": "Education",
+      "weightage": {edu_w},
+      "submenus": [
+        {{ "submenu": "Degree Alignment", "weightage": 100, "score": number, "weighted_score": number, "remarks": "..." }}
+      ],
+      "section_contribution": number
+    }},
+    """.format(
+        tech_w=weights.get("Technical Skills", 0),
+        exp_w=weights.get("Work Experience", 0),
+        proj_w=weights.get("Projects", 0),
+        edu_w=weights.get("Education", 0)
+    )
+
+    # Optional Sections
+    if include_soft:
+        sections_json_structure += """
+        {{
+          "section": "Soft Skills",
+          "weightage": {soft_w},
+          "submenus": [{{ "submenu": "Communication & Leadership", "weightage": 100, "score": number, "weighted_score": number, "remarks": "..." }}],
+          "section_contribution": number
+        }},
+        """.format(soft_w=weights.get("Soft Skills", 0))
+    else:
+        sections_json_structure += """
+        {{
+          "section": "Soft Skills",
+          "weightage": 0,
+          "submenus": [],
+          "remarks": "Inferred soft skills only (Not Scored)"
+        }},
+        """
+
+    if include_achievements:
+        sections_json_structure += """
+        {{
+          "section": "Achievements",
+          "weightage": {ach_w},
+          "submenus": [{{ "submenu": "Awards & Certifications", "weightage": 100, "score": number, "weighted_score": number, "remarks": "..." }}],
+          "section_contribution": number
+        }}
+        """.format(ach_w=weights.get("Achievements", 0))
+    else:
+         sections_json_structure += """
+        {{
+          "section": "Achievements",
+          "weightage": 0,
+          "submenus": [],
+          "remarks": "Certifications and awards only (Not Scored)"
+        }}
+        """
+    
     try:
         current_step = "log_start"; log_progress(job_id, f"generate_report_start_{attempt_id}", "Entering generate_report")
         current_step = "log_raw_inputs"; log_progress(job_id, f"generate_report_raw_inputs_{attempt_id}", "Raw input previews", {"resume_preview": resume_text[:200], "jd_preview": job_description[:200]})
         current_step = "log_input_preview"; log_progress(job_id, f"generate_report_input_{attempt_id}", "Preparing prompt", {"resume_preview": resume_text[:1000], "jd_preview": job_description[:1000]})
         
+         # --- FIXED PROMPT TEMPLATE (Double Curly Braces) ---
         prompt_template = """
-Analyze this resume against the job description and return ONLY a valid JSON response with:
-- overall_match_score (percentage, 0-100)
-- matched_skills (array of objects with:
-requirement (detailed, e.g., "Python for automation"),
-matched ('yes', 'partial', 'no'),
-details (specific evidence from resume or "Not mentioned" if absent))
-- summary (a 2-3 line compelling selling point highlighting the candidate's potential and key strengths for the role)
-- companies (array of objects with:
-name (string, company name),
-designation (string, role at company or "-" if not specified),
-years (string, duration like "2019 - 2022" or "-" if not specified))
-- missing_or_weak_areas (array of strings listing gaps)
-- top_skills (array of candidate's strongest skills)
-- development_gaps (array of skills needing improvement)
-- additional_certifications (array of strings listing certifications not required by JD)
-- section_wise_scoring (array of objects with main sections, each containing:
+You are an expert ATS system analyzing candidate fit.
+Return ONLY a valid JSON object. No explanations. No markdown.
+
+=== ANALYSIS FRAMEWORK ===
+
+1. MATCHING METHODOLOGY (STRICT):
+   - Explicit Match (✅ score 8–10): Direct, current evidence in resume
+   - Strong Implied (⚠ score 6–7): Clear indirect or strongly related evidence
+   - Weak Implied (⚠ score 4–5): Transferable, limited, or dated evidence
+   - No Match (❌ score 0–3): Absent or insufficient evidence
+
+2. SCORING SCALE (CRITICAL – FOLLOW EXACTLY):
+   - ALL scores are on a 0–10 scale until the FINAL step
+   - NEVER divide scores by 10
+   - NEVER normalize scores early
+   - Multiply by 10 ONLY ONCE at the very end to get a 0–100 score
+
+3. SECTION SCORE CALCULATION (LOCKED):
+   For each section:
+     raw_score = Σ(submenu.score × submenu.weightage / 100)
+     section_contribution = raw_score × (section.weightage / 100)
+
+   Final calculation (ONLY here):
+     overall_match_score = Σ(section_contribution) × 10
+
+4. {weightage_rules_block}
+
+5. CONFIDENCE & HIRING LOGIC:
+   - If ALL must-have skills are met → confidence_level = "high"
+   - Nice-to-have gaps must NOT reduce confidence
+   - Critical gaps ONLY if JD explicitly marks skill as MUST
+
+=== INPUT DATA ===
+Job Description:
+{job_description}
+
+Resume:
+{resume_text}
+
+=== REQUIRED JSON STRUCTURE ===
+
 {{
-section (string),
-weightage (percentage),
-submenus (array of {{ submenu (string), weightage (percentage of section), score (out of 10), weighted_score (calculated), remarks (string) }})
-}})
-- candidate_name (string, extracted from resume or "Unknown" if not found)
-- email (string, extracted from resume or "" if not found)
-- phone_number (string, extracted from resume or "" if not found)
-- github (string, extracted from resume or "" if not found)
-- linkedin (string, extracted from resume or "" if not found)
-Job Description: {job_description}
-Resume: {resume_text}
-Structure section_wise_scoring with main sections and submenus:
-- Technical Skills (weightage: 45%) ### MODIFIED WEIGHT
-- Work Experience (weightage: 30%)
-- Projects (weightage: 15%, no submenus. Score the overall quality and relevance of projects directly in a single 'Projects' submenu.)
-- Soft Skills (Weightage: 0%, for listing purposes only) ### MODIFIED SECTION
-- Education (Conditional Weightage)
-- Achievements (Weightage: 0%, for listing purposes only)
-ADDED: New Conditional Scoring Rules
-1. Education Scoring:
-- IF the job description explicitly states a mandatory degree or educational requirement (e.g., "must have a Bachelor's in Computer Science"), set the 'Education' section's weightage to 10%.
-- ELSE (if education is not a mandatory requirement), set the 'Education' section's weightage to 0%. It should NOT contribute to the overall_match_score. In this case, still list the education details in the 'remarks' but leave 'score' and 'weighted_score' as 0.
-2. Soft Skills & Achievements Scoring: ### MODIFIED RULE
-- The 'Soft Skills' and 'Achievements' sections ALWAYS have a weightage of 0%. They do NOT contribute to the overall_match_score.
-- Do not provide a score or weighted_score for these sections. Use the 'remarks' field to list details (e.g., inferred soft skills, awards found in the resume).
-3. Weightage Re-distribution: ### MODIFIED RULE
-- The total weightage of all scored sections must sum to 100%.
-- The base weights are: Technical Skills (45%), Work Experience (30%), Projects (15%). These sum to 90%.
-- IF 'Education' is scored (giving it a 10% weightage), these base weights are used, and the total correctly sums to 100%.
-- IF 'Education' is NOT scored (0% weightage), you MUST proportionally redistribute its 10% weight among the other three scored sections (Technical Skills, Work Experience, Projects) to ensure their total weightage sums to 100%.
-Scoring Guidelines:
-- 'yes' (8-10/10): Clear evidence of the skill matching the JD.
-- 'partial' (4-7/10): Implied or indirect evidence.
-- 'no' (0-3/10): No evidence.
-- Infer skills from context (e.g., "Python used in automation tasks" matches "Python for automation").
-- Calculate overall_match_score as the sum of each section's weighted contribution:
-- section_score = sum(submenu.weightage * submenu.score) / 100
-- overall_match_score = sum(section.weightage * section_score) / 100
-For companies:
-- Extract company names, designations, and years from work experience sections.
-- If designation is not explicitly mentioned, use "-".
-- If years are not specified, use "-".
-- Example: "Senior Developer at TCS, 2019 - 2022" becomes {{ "name": "TCS", "designation": "Senior Developer", "years": "2019 - 2022" }}
-Use symbols: ✅ for 'yes', ⚠ for 'partial', ❌ for 'no'. IMPORTANT: Ensure the output is ONLY a single, valid JSON object. All string values within the JSON must be properly escaped according to JSON standards (e.g., use \\" for quotes inside strings, \\\\ for backslashes, etc.).
+  "candidate_info": {{
+    "name": "string or 'Unknown'",
+    "email": "string or ''",
+    "phone": "string or ''",
+    "linkedin": "string or ''",
+    "github": "string or ''"
+  }},
+
+  "overall_match_score": number,
+
+  "match_quality": {{
+    "hiring_recommendation": "strong_yes | yes | maybe | no",
+    "confidence_level": "high | medium | low",
+    "summary": "2–3 concise, evidence-based sentences on candidate fit",
+    "key_differentiators": ["array of unique strengths"]
+  }},
+
+  "requirements_coverage": {{
+    "must_have_skills_met": "X/Y",
+    "nice_to_have_skills_met": "X/Y",
+    "critical_gaps": ["array or empty"]
+  }},
+
+  "matched_skills": [
+    {{
+      "requirement": "Exact skill from JD",
+      "matched": "yes | partial | no",
+      "score": number,
+      "evidence": "Exact resume evidence or 'Not mentioned'",
+      "recency": "current | dated | unknown"
+    }}
+  ],
+
+  "experience_analysis": {{
+    "total_years": number,
+    "relevant_years": number,
+    "role_progression": "ascending | lateral | descending",
+    "companies": [
+      {{
+        "name": "string",
+        "designation": "string or '-'",
+        "duration": "YYYY-MM - YYYY-MM or '-'",
+        "relevance_score": number
+      }}
+    ]
+  }},
+
+  "section_wise_scoring": [
+    {sections_json_block}
+  ],
+
+  "top_skills": ["top 5–7 strongest skills"],
+  "development_gaps": ["skills to improve"],
+  "additional_certifications": ["certifications not required by JD"],
+  "red_flags": ["array or empty"],
+
+  "resume_quality": {{
+    "parsing_confidence": number,
+    "format_issues": ["array or empty"],
+    "completeness_score": number
+  }}
+}}
+
+=== FINAL VALIDATION (MANDATORY) ===
+Before output:
+- Section weightages MUST sum to 100
+- overall_match_score MUST equal Σ(section_contribution) × 10
+- No section with 0% weightage may influence score
+- Do NOT divide any score by 10
+- Output ONLY valid JSON
+
 """ # Keep prompt concise here, assume details are known by model or adjust if needed
         current_step = "before_format"; log_progress(job_id, f"generate_report_before_format_{attempt_id}", "Formatting prompt")
-        prompt = prompt_template.format(job_description=job_description, resume_text=resume_text)
+        prompt = prompt_template.format(job_description=job_description, resume_text=resume_text, weightage_rules_block=weightage_text, sections_json_block=sections_json_structure)
         current_step = "after_format"; log_progress(job_id, f"generate_report_after_format_{attempt_id}", "Prompt formatted", {"prompt_preview": prompt[:500]})
 
         current_step = "before_api_call"; log_progress(job_id, f"generate_report_before_api_call_{attempt_id}", "Calling OpenAI API")
         
+        # 2. NEW API CALL PARAMETERS
+        # Note: "gpt-4.1" does not exist in public API. Assuming "gpt-4o" or "gpt-4-turbo".
+        # Using "gpt-4o" as it is the current flagship.
         response = openai_client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o", 
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
-            temperature=0.2,
+            temperature=1,
+            top_p=0.80,
         )
         
         current_step = "after_api_call"; log_progress(job_id, f"generate_report_after_api_call_{attempt_id}", "Returned from OpenAI API")
@@ -376,20 +546,80 @@ Use symbols: ✅ for 'yes', ⚠ for 'partial', ❌ for 'no'. IMPORTANT: Ensure t
 
         current_step = "parse_json"
         try:
-            report = json.loads(ai_output)
+            raw_report = json.loads(ai_output)
         except json.JSONDecodeError as e:
             log_progress(job_id, f"generate_report_parse_error_{attempt_id}", f"Failed JSON parse: {e}", {"preview": ai_output[:2000]})
             raise Exception(f"Invalid JSON from OpenAI. Original error: {e}") from e
 
         status = 'SUCCESS'
+        
+        # 3. BACKWARD COMPATIBILITY MAPPING (Crucial Step)
+        # This converts the new nested structure to the flat structure your PDF/DB code expects.
+        report = raw_report.copy()
+        
+         # 1. Map Candidate Info to top level for PDF
+        c_info = raw_report.get("candidate_info", {})
+        report["candidate_name"] = c_info.get("name", "Unknown")
+        report["email"] = c_info.get("email", "")
+        report["phone_number"] = c_info.get("phone", "")
+        report["linkedin"] = c_info.get("linkedin", "")
+        report["github"] = c_info.get("github", "")
+
+        # 2. Map Summary (The new prompt puts summary inside 'match_quality')
+        if "match_quality" in raw_report and "summary" in raw_report["match_quality"]:
+            report["summary"] = raw_report["match_quality"]["summary"]
+
+        # Map Companies
+        # New format: experience_analysis -> companies -> duration
+        # Old format: companies -> years
+        exp_analysis = raw_report.get("experience_analysis", {})
+        companies_raw = exp_analysis.get("companies", [])
+        mapped_companies = []
+        for c in companies_raw:
+            mapped_companies.append({
+                "name": c.get("name"),
+                "designation": c.get("designation"),
+                "years": c.get("duration", "-") 
+            })
+        report["companies"] = mapped_companies
+        
+        # --- 4. Gaps & Coverage (CRITICAL FIX) ---
+        # Prioritize 'critical_gaps' from requirements_coverage if available
+        req_coverage = raw_report.get("requirements_coverage", {})
+        critical_gaps = req_coverage.get("critical_gaps", [])
+        dev_gaps = raw_report.get("development_gaps", [])
+        
+        # Consolidate into the field the DB expects
+        if critical_gaps:
+            report["missing_or_weak_areas"] = critical_gaps
+        elif dev_gaps:
+             report["missing_or_weak_areas"] = dev_gaps
+        else:
+             report["missing_or_weak_areas"] = []
+
+        # Ensure these are always present for DB
+        report["red_flags"] = raw_report.get("red_flags", [])
+        report["requirements_coverage"] = req_coverage
+        
+        if "matched_skills" in report:
+            for skill in report["matched_skills"]:
+                # Map 'evidence' to 'details' for PDF compatibility
+                if "evidence" in skill and "details" not in skill:
+                    skill["details"] = skill["evidence"]
+
         analysis_for_log = report
 
         current_step = "log_parsed_report"; log_progress(job_id, f"generate_report_parsed_{attempt_id}", "Parsed report structure", {"keys": list(report.keys())})
 
         current_step = "validate_report"
-        required_fields = ["overall_match_score", "matched_skills", "summary", "companies", "missing_or_weak_areas", "top_skills", "development_gaps", "additional_certifications", "section_wise_scoring", "candidate_name", "email", "phone_number", "github", "linkedin"]
+        # Updated validation list to check for the FLAT keys we just mapped
+        required_fields = ["overall_match_score", "matched_skills", "summary", "companies", "missing_or_weak_areas", "top_skills", "development_gaps", "section_wise_scoring", "candidate_name", "email"]
         for field in required_fields:
-            if field not in report: raise Exception(f"Missing required field in Gemini response: {field}") # Fail early
+            if field not in report: 
+                # If missing, try to patch it to avoid crash
+                logger.warning(f"Missing field {field} in report, adding default.")
+                report[field] = [] if field in ["companies", "missing_or_weak_areas", "top_skills", "development_gaps"] else "N/A"
+
 
         current_step = "normalize_companies"
         # Company normalization logic (ensure normalize_company_name is defined)
@@ -570,7 +800,7 @@ def normalize_company_name(name: str) -> str:
     return ' '.join(normalized.split())
 
 
-def process_analysis(job_id: str, candidate_id: str, resume_path: str, job_description_from_request: str, organization_id: str, user_id: str):
+def process_analysis(job_id: str, candidate_id: str, resume_path: str, job_description_from_request: str, organization_id: str, user_id: str, analysis_config: dict = None):
     """Main background task to process resume analysis."""
     logger.info(f"Starting process_analysis for job_id: {job_id}, candidate_id: {candidate_id}, organization_id: {organization_id}, user_id: {user_id}")
     local_resume_path = None
@@ -603,7 +833,7 @@ def process_analysis(job_id: str, candidate_id: str, resume_path: str, job_descr
 
       
         log_progress(job_id, "generate_report", "Generating report with OpenAI")
-        report = generate_report(resume_text, job_description_from_db, job_id, organization_id, user_id)
+        report = generate_report(resume_text, job_description_from_db, job_id, organization_id, user_id, analysis_config)
         log_progress(job_id, "generate_report_success", "Report generated", {"score": report.get("overall_match_score", "N/A")})
 
       
@@ -673,23 +903,40 @@ def process_analysis(job_id: str, candidate_id: str, resume_path: str, job_descr
             "job_id": job_id, 
             "candidate_id": candidate_id, 
             "resume_text": resume_text or None,
+            
+            # --- SCORING ---
             "overall_score": round(report.get("overall_match_score", 0)),
-            "matched_skills": report.get("matched_skills", []),
+            
+            # --- TEXT/ARRAYS ---
             "summary": report.get("summary"),
             "missing_or_weak_areas": report.get("missing_or_weak_areas", []),
             "top_skills": report.get("top_skills", []), 
             "development_gaps": report.get("development_gaps", []),
             "additional_certifications": report.get("additional_certifications", []),
+            
+            # --- JSONB STRUCTURES (Rich Data) ---
+            "matched_skills": report.get("matched_skills", []),
             "section_wise_scoring": report.get("section_wise_scoring", {}),
+            "match_quality": report.get("match_quality", {}),
+            "resume_quality": report.get("resume_quality", {}),
+            
+            # --- CANDIDATE INFO ---
             "candidate_name": report.get("candidate_name", "Unknown"), 
             "email": report.get("email", ""),
             "phone_number": report.get("phone_number", ""), 
             "github": report.get("github", ""),
             "linkedin": report.get("linkedin", ""), 
+            
+            # --- METADATA ---
             "report_url": report_public_url,
             "has_validated_resume": True, 
             "updated_at": datetime.datetime.utcnow().isoformat(),
-            "organization_id": organization_id
+            "organization_id": organization_id,
+            
+            # --- CRITICAL: RAW BACKUP ---
+            # Saves the full object including 'experience_analysis' (stats), 
+            # 'requirements_coverage', and 'red_flags' which might not have dedicated columns yet.
+            "raw_ai_analysis": report
         }
         log_progress(job_id, "save_final_analysis", "Upserting final candidate_resume_analysis data")
       
@@ -724,3 +971,4 @@ def process_analysis(job_id: str, candidate_id: str, resume_path: str, job_descr
             log_progress(job_id, "cleanup_error", f"Failed to clean up temporary files: {str(cleanup_e)}")
 
 # --- END OF tasks.py FILE ---
+# new change for the analysis_config

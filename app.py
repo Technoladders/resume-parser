@@ -39,19 +39,23 @@ def validate_candidate():
 
     # Validate job_id exists in hr_jobs
     try:
-        response = supabase.table("hr_jobs").select("id, job_id").eq("job_id", job_id).eq("organization_id", organization_id).execute()
+        response = supabase.table("hr_jobs").select("id, job_id, analysis_config").eq("job_id", job_id).eq("organization_id", organization_id).execute()
         logger.info("Supabase response for job_id %s: %s", job_id, response)
         if not response.data:
             all_jobs = supabase.table("hr_jobs").select("job_id").execute()
             logger.info("All job IDs in hr_jobs: %s", all_jobs.data)
             logger.error("Job ID %s not found in hr_jobs for organization_id", job_id, organization_id)
             return jsonify({"error": "Job ID not found for the specified organization"}), 404
-        job_uuid = response.data[0]["id"]
+        job_data = response.data[0]
+        job_uuid = job_data["id"]
+        analysis_config = job_data.get("analysis_config")
+        
+        
     except Exception as e:
         logger.error("Error validating job_id %s for organization_id  %s: %s", job_id, organization_id, str(e))
         return jsonify({"error": "Failed to validate job ID"}), 500
 
-    job = queue.enqueue(tasks.process_analysis, job_uuid, candidate_id, resume_url, job_description, organization_id, user_id)
+    job = queue.enqueue(tasks.process_analysis, job_uuid, candidate_id, resume_url, job_description, organization_id, user_id, analysis_config)
     logger.info("Enqueued job with ID: %s", job.id)
     return jsonify({"job_id": job.id, "job_uuid": job_uuid}), 202
 
@@ -89,11 +93,12 @@ def validate_candidates_batch():
 
     # --- 2. Validate the Job ID once for the entire batch ---
     try:
-        response = supabase.table("hr_jobs").select("id").eq("job_id", job_id).eq("organization_id", organization_id).execute()
+        response = supabase.table("hr_jobs").select("id, analysis_config").eq("job_id", job_id).eq("organization_id", organization_id).execute()
         if not response.data:
             logger.error(f"Batch job failed: Job ID {job_id} not found for organization {organization_id}")
             return jsonify({"error": "Job ID not found for the specified organization"}), 404
         job_uuid = response.data[0]["id"]
+        analysis_config = response.data[0].get("analysis_config")
     except Exception as e:
         logger.error(f"Batch job failed: Error validating job_id {job_id}: {e}")
         return jsonify({"error": "Failed to validate job ID"}), 500
@@ -118,7 +123,8 @@ def validate_candidates_batch():
             resume_url,
             job_description,
             organization_id,
-            user_id
+            user_id,
+            analysis_config
         )
         logger.info(f"Enqueued job {job.id} for candidate {candidate_id} in batch {batch_id}")
         enqueued_jobs.append({
